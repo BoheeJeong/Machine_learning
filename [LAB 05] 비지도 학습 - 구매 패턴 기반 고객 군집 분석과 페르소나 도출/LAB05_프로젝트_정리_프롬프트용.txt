@@ -1,0 +1,128 @@
+================================================================================
+[LAB 05] Wholesale 고객 구매 패턴 · TabPy 연동 — 프로젝트 종합 정리 (프롬프트용)
+================================================================================
+아래 내용을 Gemini/ChatGPT 등에 "내가 작업한 프로젝트 정보"로 붙여 넣어 사용하세요.
+
+--------------------------------------------------------------------------------
+1. 프로젝트 목적
+--------------------------------------------------------------------------------
+- 데이터: Wholesale Customers (도매 유통 고객, 연간 구매액 등)
+- 목표 ① 군집: 구매 패턴으로 고객 군집(0~4) 예측 → PCA 산점도, Biplot 시각화
+- 목표 ② 채널 분류: 구매액 + Region으로 Channel 0/1 (Horeca vs Retail) 예측
+- Tableau에서 TabPy로 실시간 예측·시각화
+
+--------------------------------------------------------------------------------
+2. 데이터 컬럼 (원본)
+--------------------------------------------------------------------------------
+- Fresh, Milk, Grocery, Frozen, Detergents_Paper, Delicassen: 연간 구매액 (연속형, mu)
+- Channel: 1 = Horeca, 2 = Retail (목표 변수, 학습 시 0/1로 변환)
+- Region: 1, 2, 3 (Lisbon, Oporto, Other — 원본 데이터셋에 이미 숫자로 저장됨)
+
+--------------------------------------------------------------------------------
+3. 전처리 (채널 분류 모델 공통)
+--------------------------------------------------------------------------------
+- 6개 구매 컬럼에 np.log1p 적용 → log_Fresh, log_Milk, log_Grocery, log_Frozen, log_Detergents_Paper, log_Delicassen
+- Region은 로그 변환 없이 그대로 사용 (1, 2, 3)
+- StandardScaler: 13컬럼(RAW 6 + log 6 + Region) 전체로 fit/transform 후, 학습에는 스케일된 log 6개 + Region 7컬럼만 사용
+- train_test_split: test_size=0.25, random_state=52, stratify=y
+
+--------------------------------------------------------------------------------
+4. 폴더 내 주요 파일
+--------------------------------------------------------------------------------
+[노트북 — 채널 분류 모델]
+- 01-XGBoost_Channel_분류_TabPy.ipynb     → XGBoost, TabPy 예측 함수 예시 포함
+- 02-LogisticRegression_Channel_분류.ipynb
+- 03-SGDClassifier_Channel_분류.ipynb
+- 04-DecisionTree_Channel_분류.ipynb
+- 05-RandomForest_Channel_분류.ipynb
+- 06-GradientBoosting_Channel_분류.ipynb
+- 07-CatBoost_Channel_분류.ipynb
+- 08-전체_모델_비교_과적합_FeatureImportance_SHAP.ipynb  → 7개 모델 성능·과적합·Feature Importance·SHAP·채택 추천
+
+[노트북 — 군집]
+- 00.PBT_구매 패턴 기반 고객 군집 분석과 페르소나 도출.ipynb  → 군집·PCA·페르소나
+
+[스크립트]
+- tabpy_wholesale.py   → TabPy에서 호출하는 메인 스크립트 (군집 + 채널 4개 모델)
+- 00-모델_요약_성능_과적합_리포트.py  → 01~07 pkl 로드 후 성능·과적합 판정, CSV/MD 저장
+- save_wholesale_cluster_model.py     → 군집용 scaler+PCA+KMeans pkl 생성
+
+[저장된 모델·스케일러 pkl]
+- wholesale_scaler.pkl           → 채널 분류용 StandardScaler (13컬럼 fit)
+- wholesale_logistic.pkl          → LogisticRegression
+- wholesale_xgb.pkl                → XGBoost
+- wholesale_sgd.pkl                → SGDClassifier
+- wholesale_dt.pkl                 → DecisionTree
+- wholesale_rf.pkl                 → RandomForest
+- wholesale_gb.pkl                 → GradientBoosting
+- wholesale_catboost.pkl           → CatBoost
+- wholesale_cluster_model.pkl      → 군집용 dict: 'scaler', 'pca', 'kmeans'
+
+[기타]
+- wholesale_for_tableau.csv        → Tableau용 데이터 (필요 시)
+- Tableau_PCA_산점도_안내.md, Tableau_매출입력_군집예측_시각화.md, TabPy_Tableau_사용법.md
+- 00-모델_요약_성능_과적합_리포트.csv / .md  → 00 스크립트 실행 결과
+
+--------------------------------------------------------------------------------
+5. tabpy_wholesale.py — TabPy에서 쓸 수 있는 함수
+--------------------------------------------------------------------------------
+[군집]
+- get_cluster(Fresh, Milk, Grocery, Frozen, Detergents_Paper, Delicassen)
+  → 6개 구매액만 넣으면 군집 ID (0~4) 리스트 반환. Tableau: SCRIPT_INT
+- get_pca1(동일 6인자), get_pca2(동일), get_pca3(동일)  → PC1/PC2/PC3 점수. SCRIPT_REAL
+- get_biplot_pc1_loadings(Feature), get_biplot_pc2_loadings(Feature)  → Biplot 변수별 로딩. Feature는 'Fresh','Milk' 등
+
+[채널 분류 — 4개 모델만 사용 권장: LogisticRegression, XGBoost, CatBoost, RandomForest]
+- get_channel(Fresh, Milk, Grocery, Frozen, Detergents_Paper, Delicassen, Region, ModelName='XGBoost')
+  → 채널 0 또는 1 리스트. Tableau: SCRIPT_INT
+- get_channel_proba(동일 7인자 + ModelName)
+  → 채널 1 확률 리스트. Tableau: SCRIPT_REAL
+
+ModelName: 'LogisticRegression', 'XGBoost', 'CatBoost', 'RandomForest' (대소문자 무관)
+
+[인자 순서]
+- 군집: Fresh, Milk, Grocery, Frozen, Detergents_Paper, Delicassen (6개)
+- 채널: Fresh, Milk, Grocery, Frozen, Detergents_Paper, Delicassen, Region (7개), 마지막에 ModelName
+
+--------------------------------------------------------------------------------
+6. Tableau 계산 필드 예시 (복사용)
+--------------------------------------------------------------------------------
+[채널 0/1 예측 — XGBoost]
+SCRIPT_INT("from tabpy_wholesale import get_channel; return get_channel(_arg1,_arg2,_arg3,_arg4,_arg5,_arg6,_arg7,'XGBoost')",
+  SUM([Fresh]), SUM([Milk]), SUM([Grocery]), SUM([Frozen]), SUM([Detergents_Paper]), SUM([Delicassen]), ATTR([Region]))
+
+[채널 확률 — XGBoost]
+SCRIPT_REAL("from tabpy_wholesale import get_channel_proba; return get_channel_proba(_arg1,_arg2,_arg3,_arg4,_arg5,_arg6,_arg7,'XGBoost')",
+  SUM([Fresh]), SUM([Milk]), SUM([Grocery]), SUM([Frozen]), SUM([Detergents_Paper]), SUM([Delicassen]), ATTR([Region]))
+
+[군집 ID]
+SCRIPT_INT("from tabpy_wholesale import get_cluster; return get_cluster(_arg1,_arg2,_arg3,_arg4,_arg5,_arg6)",
+  SUM([Fresh]), SUM([Milk]), SUM([Grocery]), SUM([Frozen]), SUM([Detergents_Paper]), SUM([Delicassen]))
+
+[PC1 점수]
+SCRIPT_REAL("from tabpy_wholesale import get_pca1; return get_pca1(_arg1,_arg2,_arg3,_arg4,_arg5,_arg6)",
+  SUM([Fresh]), SUM([Milk]), SUM([Grocery]), SUM([Frozen]), SUM([Detergents_Paper]), SUM([Delicassen]))
+
+--------------------------------------------------------------------------------
+7. TabPy 서버 실행 시 유의사항
+--------------------------------------------------------------------------------
+- tabpy_wholesale.py와 모든 pkl이 같은 폴더에 있어야 함.
+- 서버 실행: 이 폴더를 현재 디렉터리로 두고 `tabpy` 실행 권장.
+  예: cd "C:\Machine_Learning\[LAB 05] 비지도 학습 - 구매 패턴 기반 고객 군집 분석과 페르소나 도출"
+      tabpy
+- Tableau: 도움말 → 설정 및 성능 → 외부 서비스 연결 관리 → localhost, 포트 9004
+
+--------------------------------------------------------------------------------
+8. Region / Channel 시각화 시
+--------------------------------------------------------------------------------
+- 학습·예측은 Region 1,2,3 그대로 사용. 시각화할 때만 CASE WHEN 또는 매핑 테이블로 레이블 표시 권장.
+  예: 1→Lisbon, 2→Oporto, 3→Other / Channel 0→Retail, 1→Horeca 등.
+
+--------------------------------------------------------------------------------
+9. 요약
+--------------------------------------------------------------------------------
+- 채널 분류: 7개 피처(log 6 + Region), 4개 모델 권장(LogisticRegression, XGBoost, CatBoost, RandomForest). TabPy는 tabpy_wholesale.py의 get_channel, get_channel_proba 사용.
+- 군집: 6개 구매액 → PCA → KMeans → get_cluster, get_pca1/2/3, get_biplot_* 사용.
+- 모든 pkl과 tabpy_wholesale.py는 동일 [LAB 05] 폴더에 두고 TabPy를 해당 폴더에서 실행하면 Tableau와 연동 가능.
+
+================================================================================
