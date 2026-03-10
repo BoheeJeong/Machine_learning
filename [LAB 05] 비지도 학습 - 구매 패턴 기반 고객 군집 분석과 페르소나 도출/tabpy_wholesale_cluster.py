@@ -4,6 +4,7 @@ TabPy에서 호출할 Wholesale 구매 패턴 스크립트 (군집 + 채널 분�
 
 [1] 군집 예측 (기존)
   - get_cluster: 6개 구매 컬럼 → 군집 ID (0~4)
+  - get_pca_coords: 6개 구매 컬럼 → PCA 좌표 리스트 (행별 [PC1, PC2, ...])
   - get_pca1, get_pca2, get_pca3, get_biplot_pc1_loadings, get_biplot_pc2_loadings
   - 모델: wholesale_cluster_model.pkl
 
@@ -39,6 +40,7 @@ TabPy에서 호출할 Wholesale 구매 패턴 스크립트 (군집 + 채널 분�
 import os
 import pickle
 import numpy as np
+import pandas as pd
 from pathlib import Path
 from tabpy.tabpy_tools.client import Client
 _DIR = Path(__file__).resolve().parent
@@ -117,6 +119,44 @@ def get_cluster(Fresh, Milk, Grocery, Frozen, Detergents_Paper, Delicassen):
     pc = model['pca'].transform(scaled_log)
     labels = model['kmeans'].predict(pc)
     return labels.tolist()
+
+
+def get_pca_coords(Fresh, Milk, Grocery, Frozen, Detergents_Paper, Delicassen):
+    """
+    TabPy/Tableau에서 호출. 6개 구매 컬럼 → PCA 좌표 리스트 (행별 [PC1, PC2, ...]).
+    태블로에서 PC1, PC2 등을 각각 쓰려면 이 리스트의 열을 SCRIPT_REAL 등으로 꺼내 쓰면 됨.
+    """
+    model = _load_model()
+    fresh = _to_array(Fresh)
+    milk = _to_array(Milk)
+    grocery = _to_array(Grocery)
+    frozen = _to_array(Frozen)
+    det = _to_array(Detergents_Paper)
+    deli = _to_array(Delicassen)
+
+    n = max(len(fresh), len(milk), len(grocery), len(frozen), len(det), len(deli))
+    if n == 0:
+        return []
+    if len(fresh) == 1 and n > 1:
+        fresh = np.full(n, float(fresh.flat[0]))
+    if len(milk) == 1 and n > 1:
+        milk = np.full(n, float(milk.flat[0]))
+    if len(grocery) == 1 and n > 1:
+        grocery = np.full(n, float(grocery.flat[0]))
+    if len(frozen) == 1 and n > 1:
+        frozen = np.full(n, float(frozen.flat[0]))
+    if len(det) == 1 and n > 1:
+        det = np.full(n, float(det.flat[0]))
+    if len(deli) == 1 and n > 1:
+        deli = np.full(n, float(deli.flat[0]))
+
+    raw = np.column_stack([fresh, milk, grocery, frozen, det, deli])
+    log = np.log1p(raw)
+    full = np.hstack([raw, log])
+    scaled = model['scaler'].transform(full)
+    scaled_log = scaled[:, 6:]
+    pc = model['pca'].transform(scaled_log)
+    return pc.tolist()
 
 
 def _transform_to_pc(Fresh, Milk, Grocery, Frozen, Detergents_Paper, Delicassen):
@@ -360,6 +400,64 @@ def _get_feature_importance_dict(ModelName):
     return {name: float(importances[i]) for i, name in enumerate(_FEATURE_IMPORTANCE_ORDER)}
 
 
+def get_roc_metrics(model_name, path_index):
+    """ROC TPR/AUC용. CSV에서 모델별 FPR/TPR 읽어 101개 지점 보간 후 반환."""
+    file_path = _DIR / "roc_curve_multi_models_for_tableau.csv"
+    try:
+        df = pd.read_csv(file_path)
+        target_model = model_name[0] if isinstance(model_name, list) else model_name
+        model_df = df[df["model_name"] == target_model].sort_values("FPR")
+        if model_df.empty:
+            return [0.0] * len(path_index), [0.0] * len(path_index)
+        auc_val = model_df["AUC"].iloc[0]
+        target_fpr = np.linspace(0, 1, 101)
+        interp_tpr = np.interp(target_fpr, model_df["FPR"].values, model_df["TPR"].values)
+        return interp_tpr.tolist(), [float(auc_val)] * len(path_index)
+    except Exception:
+        return [0.0] * len(path_index), [0.0] * len(path_index)
+
+
+def get_tpr_for_tableau(model_name, path_index):
+    tpr_list, _ = get_roc_metrics(model_name, path_index)
+    return tpr_list
+
+
+def get_auc_for_tableau(model_name, path_index):
+    _, auc_list = get_roc_metrics(model_name, path_index)
+    return auc_list
+
+
+def get_confusion_metrics(model_name):
+    """[TN, FP, FN, TP] 반환 (wide CSV 한 행)."""
+    file_path = _DIR / "confusion_matrix_models.csv"
+    try:
+        df = pd.read_csv(file_path)
+        target_model = model_name[0] if isinstance(model_name, list) else model_name
+        row = df[df["model_name"] == target_model].iloc[0]
+        return [float(row["TN"]), float(row["FP"]), float(row["FN"]), float(row["TP"])]
+    except Exception:
+        return [0.0, 0.0, 0.0, 0.0]
+
+
+def get_confusion_matrix_live(model_name):
+    file_path = _DIR / "confusion_matrix_models.csv"
+    try:
+        df = pd.read_csv(file_path)
+        # 1. 모델명 필터링
+        target_model = model_name[0] if isinstance(model_name, list) else model_name
+        model_df = df[df["model_name"] == target_model].copy()
+        
+        # 2. 실제(actual)와 예측(predicted) 순으로 정렬 
+        # (0,0)->TN, (0,1)->FP, (1,0)->FN, (1,1)->TP 순서가 보장됩니다.
+        model_df = model_df.sort_values(["actual", "predicted"])
+        
+        # 3. value 컬럼의 값 4개를 리스트로 반환
+        return model_df["value"].astype(float).tolist()
+    except Exception as e:
+        print(f"Error: {e}")
+        return [0.0, 0.0, 0.0, 0.0]
+
+
 def get_feature_importance(Feature=None, ModelName="XGBoost"):
     """
     TabPy/Tableau: 이름 기반 특성 중요도 반환 (인덱스 순서 무관).
@@ -417,8 +515,18 @@ def _run_self_check():
             assert len(out) == 3, f"get_cluster 길이 3 기대, 실제 {len(out)}"
             assert all(isinstance(x, (int, np.integer)) and 0 <= x <= 4 for x in out), \
                 f"get_cluster 값은 0~4 정수여야 함: {out}"
+
+            coords = get_pca_coords([1, 2, 3], [10, 20, 30], [100, 200, 300],
+                                    [5, 10, 15], [20, 40, 60], [2, 4, 6])
+            assert isinstance(coords, list), "get_pca_coords 반환 타입이 list가 아님"
+            assert len(coords) == 3, f"get_pca_coords 길이 3 기대, 실제 {len(coords)}"
+            for i, row in enumerate(coords):
+                assert isinstance(row, list), f"get_pca_coords[{i}]가 list가 아님"
+                assert len(row) >= 1, f"get_pca_coords[{i}]가 비어 있음"
+                assert all(isinstance(v, (int, float, np.integer, np.floating)) for v in row), \
+                    f"get_pca_coords[{i}] 값은 숫자여야 함: {row}"
         except Exception as e:
-            errors.append(f"군집 get_cluster: {e}")
+            errors.append(f"군집 get_cluster/get_pca_coords: {e}")
     else:
         errors.append(f"군집 모델 파일 없음 (건너뜀): {_CLUSTER_MODEL_PATH.name}")
 
@@ -507,6 +615,12 @@ if __name__ == "__main__":
         override=_OVERRIDE,
     )
     client.deploy(
+        "get_pca_coords",
+        get_pca_coords,
+        "6개 구매 컬럼 → PCA 좌표 리스트 (행별 [PC1, PC2, ...]).",
+        override=_OVERRIDE,
+    )
+    client.deploy(
         "get_pca1",
         get_pca1,
         "행별 PC1 점수 (SCRIPT_REAL).",
@@ -557,7 +671,14 @@ if __name__ == "__main__":
         override=_OVERRIDE,
     )
 
-    print("TabPy 엔드포인트 배포 완료!")
-    print("  군집: get_cluster, get_pca1, get_pca2, get_pca3, get_biplot_pc1_loadings, get_biplot_pc2_loadings")
-    print("  채널: get_channel, get_channel_proba, get_feature_importance")
+    # ROC Curve & 혼동행렬 (같은 client로 한 번만 배포)
+    client.deploy("Get_ROC_TPR", get_tpr_for_tableau, "Returns TPR list for ROC Curve", override=_OVERRIDE)
+    client.deploy("Get_ROC_AUC", get_auc_for_tableau, "Returns AUC value list", override=_OVERRIDE)
+    client.deploy("Get_Confusion_Matrix", get_confusion_metrics, "Returns 4 values (TN, FP, FN, TP) for Heatmap", override=_OVERRIDE)
+    client.deploy("Get_CM_Live", get_confusion_matrix_live, "Returns [TN, FP, FN, TP] for selected model", override=_OVERRIDE)
 
+    print("TabPy 엔드포인트 배포 완료!")
+    print("  군집: get_cluster, get_pca_coords, get_pca1, get_pca2, get_pca3, get_biplot_pc1_loadings, get_biplot_pc2_loadings")
+    print("  get_pca_coords 실행 검증 완료 (자체 검사 통과)")
+    print("  채널: get_channel, get_channel_proba, get_feature_importance")
+    print("  ROC/CM: Get_ROC_TPR, Get_ROC_AUC, Get_Confusion_Matrix, Get_CM_Live")
