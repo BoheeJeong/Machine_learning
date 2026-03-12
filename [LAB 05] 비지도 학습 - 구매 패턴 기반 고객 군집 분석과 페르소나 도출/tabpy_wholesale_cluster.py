@@ -2,24 +2,29 @@
 """
 TabPy에서 호출할 Wholesale 구매 패턴 스크립트 (군집 + 채널 분류)
 
+[0] Spearman 상관계수 (UCI Wholesale 지출 항목용)
+  - calculate_spearman: 두 지출 항목 리스트(_arg1, _arg2) → Spearman 상관계수. 테이블 계산용으로 결과를 입력 길이만큼 복제한 리스트 반환.
+  - 속도: 함수 속성 OrderedDict 캐시(최대 128개). 동일 (arg1, arg2)면 재계산 없이 반환. TabPy 배포 시 이 함수만 직렬화되므로 캐시·계산 로직은 모두 함수 내부에 있음.
+  - Tableau 계산 필드: SCRIPT_REAL("return tabpy.query('calculate_spearman', _arg1, _arg2)['response']", SUM([항목1]), SUM([항목2]))
+
 [1] 군집 예측 (기존)
   - get_cluster: 6개 구매 컬럼 → 군집 ID (0~4)
   - get_pca_coords: 6개 구매 컬럼 → PCA 좌표 리스트 (행별 [PC1, PC2, ...])
   - get_pca1, get_pca2, get_pca3, get_biplot_pc1_loadings, get_biplot_pc2_loadings
   - 모델: wholesale_cluster_model.pkl
 
-[2] 채널 분류 (4개 모델: LogisticRegression, XGBoost, CatBoost, RandomForest)
+[2] 채널 분류 (4개 모델: LogisticRegression, XGBoost, SGDClassifier, RandomForest)
   - get_channel: 6개 구매 + Region(1/2/3, 범주형) → 내부에서 원핫(Region_2, Region_3) → 채널 0/1 (SCRIPT_INT)
   - get_channel_proba: 6개 구매 + Region → 채널 1 확률 (SCRIPT_REAL)
   - predict_customer_channel: 6개 구매 + Region → (예측 리스트, 확률 리스트) 한 번에 (로컬/노트북 검증용)
   - 모델: wholesale_scaler.pkl, wholesale_logistic.pkl, wholesale_xgb.pkl,
-          wholesale_catboost.pkl, wholesale_rf.pkl
+          wholesale_sgd.pkl, wholesale_rf.pkl
   - Tableau 계산 필드 예시:
     SCRIPT_INT("from tabpy_wholesale_cluster import get_channel; return get_channel(_arg1,_arg2,_arg3,_arg4,_arg5,_arg6,_arg7,'XGBoost')",
       SUM([Fresh]), SUM([Milk]), SUM([Grocery]), SUM([Frozen]), SUM([Detergents_Paper]), SUM([Delicassen]), ATTR([Region]))
     SCRIPT_REAL("from tabpy_wholesale_cluster import get_channel_proba; return get_channel_proba(_arg1,_arg2,_arg3,_arg4,_arg5,_arg6,_arg7,'XGBoost')", ...)
   - 고객별로 다른 확률/예측을 받으려면: 뷰에 [Customer ID]를 [행], [열] 또는 [마크-세부 정보]에 넣어야 합니다.
-  - ModelName: 'LogisticRegression', 'XGBoost', 'CatBoost', 'RandomForest' 중 하나
+  - ModelName: 'LogisticRegression', 'XGBoost', 'SGDClassifier', 'RandomForest' 중 하나
 
 추가로 알려주시면 좋은 정보:
   - TabPy 서버를 어디에 두실지 (로컬/서버 주소, 포트). 이 파일은 같은 폴더의 pkl을 쓰므로
@@ -39,11 +44,16 @@ TabPy에서 호출할 Wholesale 구매 패턴 스크립트 (군집 + 채널 분�
 
 import os
 import pickle
+import logging
+from collections import OrderedDict
 import numpy as np
 import pandas as pd
 from pathlib import Path
 from tabpy.tabpy_tools.client import Client
 _DIR = Path(__file__).resolve().parent
+
+# Spearman 상관계수 등 TabPy 콘솔 디버깅용 (데이터 개수 출력)
+_logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # [1] 군집 모델 (KMeans + PCA + scaler)
@@ -81,6 +91,68 @@ def _to_array(x):
     if hasattr(x, '__len__') and not isinstance(x, (str, bytes)):
         return np.asarray(x, dtype=float)
     return np.asarray([float(x)], dtype=float)
+
+
+# ---------------------------------------------------------------------------
+# [0] Spearman 상관계수 (태블로 테이블 계산용: 두 지출 항목 리스트 → 상관계수)
+# TabPy 배포 시 이 함수만 직렬화되므로, 캐시·계산 로직을 모두 이 안에 두었음.
+# ---------------------------------------------------------------------------
+def calculate_spearman(_arg1, _arg2):
+    """
+    TabPy/Tableau에서 호출. 두 지출 항목 리스트 → Spearman 상관계수.
+    테이블 계산 특성상 결과값을 입력 리스트 길이만큼 복제한 리스트로 반환합니다.
+    동일 (arg1, arg2) 조합은 함수 속성 캐시(최대 128개)로 재사용해 속도 향상.
+    """
+    _MAX_CACHE = 128
+    cache = getattr(calculate_spearman, "_spearman_cache", None)
+    if cache is None:
+        calculate_spearman._spearman_cache = OrderedDict()
+        cache = calculate_spearman._spearman_cache
+
+    try:
+        arg1 = _arg1 if hasattr(_arg1, '__len__') and not isinstance(_arg1, (str, bytes)) else [_arg1]
+        arg2 = _arg2 if hasattr(_arg2, '__len__') and not isinstance(_arg2, (str, bytes)) else [_arg2]
+        n = len(arg1)
+
+        _logger.info("calculate_spearman: 데이터 개수 = %d", n)
+        print(f"[TabPy] calculate_spearman: 데이터 개수 = {n}")
+
+        if n == 0 or len(arg2) == 0:
+            return []
+
+        t1, t2 = tuple(arg1), tuple(arg2)
+        cache_key = (t1, t2)
+        if cache_key in cache:
+            res = cache[cache_key]
+        else:
+            # 캐시 미스: 상관계수 계산 (로직 인라인, TabPy가 다른 함수를 찾지 않도록)
+            try:
+                min_len = min(len(t1), len(t2))
+                if min_len == 0:
+                    res = 0.0
+                else:
+                    s1 = pd.Series(t1[:min_len], dtype=float)
+                    s2 = pd.Series(t2[:min_len], dtype=float)
+                    valid = s1.notna() & s2.notna()
+                    s1_clean = s1[valid]
+                    s2_clean = s2[valid]
+                    if len(s1_clean) < 2 or s1_clean.nunique() < 2 or s2_clean.nunique() < 2:
+                        res = 0.0
+                    else:
+                        corr = float(s1_clean.corr(s2_clean, method="spearman"))
+                        res = corr if not pd.isna(corr) else 0.0
+            except Exception:
+                res = 0.0
+            if len(cache) >= _MAX_CACHE:
+                cache.popitem(last=False)
+            cache[cache_key] = res
+
+        return [res] * n
+    except Exception as e:
+        _logger.exception("calculate_spearman 예외: %s", e)
+        print(f"[TabPy] calculate_spearman 예외: {e}")
+        n = len(_arg1) if hasattr(_arg1, '__len__') and not isinstance(_arg1, (str, bytes)) else 1
+        return [0.0] * max(n, 1)
 
 
 def get_cluster(Fresh, Milk, Grocery, Frozen, Detergents_Paper, Delicassen):
@@ -242,7 +314,7 @@ def get_biplot_arrow_endpoints(Feature):
 
 
 # ---------------------------------------------------------------------------
-# [2] 채널 분류 (4개 모델: LogisticRegression, XGBoost, CatBoost, RandomForest)
+# [2] 채널 분류 (4개 모델: LogisticRegression, XGBoost, SGDClassifier, RandomForest)
 # ---------------------------------------------------------------------------
 # 디버깅용 특이값 (필요 시 Tableau 계산 필드에서 "뭉침" 감지용으로 사용 가능).
 # 주의: Tableau가 행 단위로 보낼 때도 호출당 1건이므로, Python만으로는 "전체 1건 뭉침"과 구분 불가.
@@ -257,7 +329,7 @@ _CHANNEL_SCALER_PATH = _DIR / "wholesale_scaler.pkl"
 _CHANNEL_MODEL_FILES = {
     "logisticregression": "wholesale_logistic.pkl",
     "xgboost": "wholesale_xgb.pkl",
-    "catboost": "wholesale_catboost.pkl",
+    "sgdclassifier": "wholesale_sgd.pkl",
     "randomforest": "wholesale_rf.pkl",
 }
 
@@ -279,7 +351,7 @@ def _load_channel_scaler():
 
 
 def _load_channel_model(model_name):
-    """model_name: 'LogisticRegression', 'XGBoost', 'CatBoost', 'RandomForest' (대소문자 무관)."""
+    """model_name: 'LogisticRegression', 'XGBoost', 'SGDClassifier', 'RandomForest' (대소문자 무관)."""
     global _channel_models
     key = str(model_name).strip().lower()
     if key not in _CHANNEL_MODEL_FILES:
@@ -347,8 +419,12 @@ def _channel_preprocess(Fresh, Milk, Grocery, Frozen, Detergents_Paper, Delicass
 def get_channel(Fresh, Milk, Grocery, Frozen, Detergents_Paper, Delicassen, Region, ModelName="XGBoost"):
     """
     TabPy/Tableau: 6개 구매 + Region → 채널 0 또는 1 리스트 (SCRIPT_INT).
-    ModelName: 'LogisticRegression', 'XGBoost', 'CatBoost', 'RandomForest' 중 하나.
+    ModelName: 'LogisticRegression', 'XGBoost', 'SGDClassifier', 'RandomForest' 중 하나.
+    태블로 파라미터(드롭다운)에서 리스트로 오면 첫 번째 값 사용.
     """
+    if hasattr(ModelName, '__len__') and not isinstance(ModelName, (str, bytes)):
+        ModelName = ModelName[0] if len(ModelName) else "XGBoost"
+    ModelName = str(ModelName).strip() or "XGBoost"
     X = _channel_preprocess(Fresh, Milk, Grocery, Frozen, Detergents_Paper, Delicassen, Region)
     if X.shape[0] == 0:
         return []
@@ -360,8 +436,12 @@ def get_channel(Fresh, Milk, Grocery, Frozen, Detergents_Paper, Delicassen, Regi
 def get_channel_proba(Fresh, Milk, Grocery, Frozen, Detergents_Paper, Delicassen, Region, ModelName="XGBoost"):
     """
     TabPy/Tableau: 6개 구매 + Region → 채널 1(양성) 확률 리스트 (SCRIPT_REAL).
-    ModelName: 'LogisticRegression', 'XGBoost', 'CatBoost', 'RandomForest' 중 하나.
+    ModelName: 'LogisticRegression', 'XGBoost', 'SGDClassifier', 'RandomForest' 중 하나.
+    태블로 파라미터(드롭다운)에서 리스트로 오면 첫 번째 값 사용.
     """
+    if hasattr(ModelName, '__len__') and not isinstance(ModelName, (str, bytes)):
+        ModelName = ModelName[0] if len(ModelName) else "XGBoost"
+    ModelName = str(ModelName).strip() or "XGBoost"
     X = _channel_preprocess(Fresh, Milk, Grocery, Frozen, Detergents_Paper, Delicassen, Region)
     if X.shape[0] == 0:
         return []
@@ -386,6 +466,25 @@ _FEATURE_IMPORTANCE_ORDER = [
     'log_Fresh', 'log_Milk', 'log_Grocery', 'log_Frozen', 'log_Detergents_Paper', 'log_Delicassen',
     'Region_2', 'Region_3'
 ]
+
+# EC2/TabPy 배포 시 메모리 부담을 줄이기 위해 CSV가 있으면 모델 로드 없이 CSV만 사용
+_FEATURE_IMPORTANCE_CSV = _DIR / "feature_importance_for_tableau.csv"
+
+
+def _get_feature_importance_dict_from_csv(ModelName):
+    """CSV에서 모델별 특성 중요도 읽기 (모델 로드 없음, TabPy 배포/실행 시 가벼움)."""
+    if not _FEATURE_IMPORTANCE_CSV.exists():
+        return None
+    try:
+        df = pd.read_csv(_FEATURE_IMPORTANCE_CSV)
+        target = ModelName[0] if hasattr(ModelName, '__len__') and not isinstance(ModelName, (str, bytes)) else ModelName
+        target = str(target).strip()
+        rows = df[df["model_name"].astype(str).str.strip() == target]
+        if rows.empty:
+            return None
+        return dict(zip(rows["feature_name"].astype(str), rows["importance"].astype(float)))
+    except Exception:
+        return None
 
 
 def _get_feature_importance_dict(ModelName):
@@ -475,7 +574,9 @@ def get_feature_importance(Feature=None, ModelName="XGBoost"):
         ModelName = ModelName[0] if len(ModelName) else "XGBoost"
     ModelName = str(ModelName).strip() or "XGBoost"
 
-    name_to_imp = _get_feature_importance_dict(ModelName)
+    name_to_imp = _get_feature_importance_dict_from_csv(ModelName)
+    if name_to_imp is None:
+        name_to_imp = _get_feature_importance_dict(ModelName)
 
     if Feature is None:
         return name_to_imp
@@ -506,6 +607,16 @@ def _run_self_check():
     """
     errors = []
 
+    # [0] Spearman 상관계수 (pkl 불필요)
+    try:
+        out = calculate_spearman([1, 2, 3, 4, 5], [2, 4, 6, 8, 10])
+        assert isinstance(out, list), "calculate_spearman 반환 타입이 list가 아님"
+        assert len(out) == 5, f"calculate_spearman 길이 5 기대, 실제 {len(out)}"
+        assert all(isinstance(x, (float, np.floating)) for x in out), f"calculate_spearman 값은 실수: {out}"
+        assert abs(out[0] - 1.0) < 1e-5, f"완전 양의 상관이면 1.0 기대: {out[0]}"
+    except Exception as e:
+        errors.append(f"calculate_spearman: {e}")
+
     # [1] 군집 모델 (파일 있으면 검사)
     if _CLUSTER_MODEL_PATH.exists():
         try:
@@ -535,7 +646,7 @@ def _run_self_check():
         available = [k for k, f in _CHANNEL_MODEL_FILES.items() if (_DIR / f).exists()]
         if available:
             _name_map = {"logisticregression": "LogisticRegression", "xgboost": "XGBoost",
-                        "catboost": "CatBoost", "randomforest": "RandomForest"}
+                        "sgdclassifier": "SGDClassifier", "randomforest": "RandomForest"}
             model_name = _name_map.get(available[0], available[0].title())
             try:
                 # 3행 샘플
@@ -664,6 +775,7 @@ if __name__ == "__main__":
         "6개 구매 + Region → 채널 1(양성) 확률 (SCRIPT_REAL). AUC-ROC 곡선용.",
         override=_OVERRIDE,
     )
+    # EC2 배포 시 메모리 부족으로 끊기면 주석 해제하지 말고, 필요 시 feature_importance_for_tableau.csv 생성 후 배포
     client.deploy(
         "get_feature_importance",
         get_feature_importance,
@@ -677,8 +789,17 @@ if __name__ == "__main__":
     client.deploy("Get_Confusion_Matrix", get_confusion_metrics, "Returns 4 values (TN, FP, FN, TP) for Heatmap", override=_OVERRIDE)
     client.deploy("Get_CM_Live", get_confusion_matrix_live, "Returns [TN, FP, FN, TP] for selected model", override=_OVERRIDE)
 
+    # Spearman 상관계수 (두 지출 항목 리스트 → 테이블 계산용 리스트)
+    client.deploy(
+        "calculate_spearman",
+        calculate_spearman,
+        "두 지출 항목 리스트 → Spearman 상관계수 (입력 길이만큼 복제된 리스트 반환). SCRIPT_REAL 사용.",
+        override=_OVERRIDE,
+    )
+
     print("TabPy 엔드포인트 배포 완료!")
+    print("  Spearman: calculate_spearman")
     print("  군집: get_cluster, get_pca_coords, get_pca1, get_pca2, get_pca3, get_biplot_pc1_loadings, get_biplot_pc2_loadings")
     print("  get_pca_coords 실행 검증 완료 (자체 검사 통과)")
-    print("  채널: get_channel, get_channel_proba, get_feature_importance")
+    print("  채널: get_channel, get_channel_proba  (get_feature_importance는 주석 처리됨)")
     print("  ROC/CM: Get_ROC_TPR, Get_ROC_AUC, Get_Confusion_Matrix, Get_CM_Live")

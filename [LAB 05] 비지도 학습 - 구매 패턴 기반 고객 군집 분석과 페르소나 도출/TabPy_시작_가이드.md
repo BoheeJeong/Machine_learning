@@ -1,6 +1,11 @@
-# TabPy "No module named 'tabpy_wholesale_cluster'" 해결
+# TabPy "No module named 'tabpy_wholesale' / 'tabpy_wholesale_cluster'" 해결
 
-Tableau에서 **ModuleNotFoundError: No module named 'tabpy_wholesale_cluster'** 가 나면, TabPy가 이 폴더를 Python 경로로 인식하지 못하는 상태입니다.
+Tableau에서 다음 오류가 나면, TabPy가 **이 폴더([LAB 05])**를 Python 경로로 인식하지 못하는 상태입니다.
+
+- **ModuleNotFoundError: No module named 'tabpy_wholesale'**
+- **ModuleNotFoundError: No module named 'tabpy_wholesale_cluster'**
+
+(태블로 계산 필드에서 `from tabpy_wholesale import ...` 를 쓰면 `tabpy_wholesale`, `from tabpy_wholesale_cluster import ...` 를 쓰면 `tabpy_wholesale_cluster` 가 필요합니다. 둘 다 **이 폴더**에 있어야 합니다.)
 
 ---
 
