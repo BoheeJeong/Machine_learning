@@ -421,16 +421,27 @@ def get_channel(Fresh, Milk, Grocery, Frozen, Detergents_Paper, Delicassen, Regi
     TabPy/Tableau: 6개 구매 + Region → 채널 0 또는 1 리스트 (SCRIPT_INT).
     ModelName: 'LogisticRegression', 'XGBoost', 'SGDClassifier', 'RandomForest' 중 하나.
     태블로 파라미터(드롭다운)에서 리스트로 오면 첫 번째 값 사용.
+    ※ 다른 모델 선택 시 값이 안 나오면: Tableau 계산 필드에서 8번째 인자로 [Select ML Model] 전달 여부 확인,
+      TabPy 서버에 4개 pkl 파일 모두 있는지 확인, TabPy 콘솔 로그에서 오류 메시지 확인.
     """
     if hasattr(ModelName, '__len__') and not isinstance(ModelName, (str, bytes)):
         ModelName = ModelName[0] if len(ModelName) else "XGBoost"
+    if ModelName is None:
+        ModelName = "XGBoost"
     ModelName = str(ModelName).strip() or "XGBoost"
-    X = _channel_preprocess(Fresh, Milk, Grocery, Frozen, Detergents_Paper, Delicassen, Region)
-    if X.shape[0] == 0:
-        return []
-    clf = _load_channel_model(ModelName)
-    pred = clf.predict(X)
-    return pred.tolist()
+    import os, sys
+    if os.environ.get("TABPY_DEBUG_CHANNEL"):
+        print(f"[TabPy get_channel] 수신 ModelName={ModelName!r}", file=sys.stderr)
+    try:
+        X = _channel_preprocess(Fresh, Milk, Grocery, Frozen, Detergents_Paper, Delicassen, Region)
+        if X.shape[0] == 0:
+            return []
+        clf = _load_channel_model(ModelName)
+        pred = clf.predict(X)
+        return pred.tolist()
+    except Exception as e:
+        print(f"[TabPy get_channel] ModelName={ModelName!r} 오류: {e}", file=sys.stderr)
+        raise
 
 
 def get_channel_proba(Fresh, Milk, Grocery, Frozen, Detergents_Paper, Delicassen, Region, ModelName="XGBoost"):
@@ -438,16 +449,27 @@ def get_channel_proba(Fresh, Milk, Grocery, Frozen, Detergents_Paper, Delicassen
     TabPy/Tableau: 6개 구매 + Region → 채널 1(양성) 확률 리스트 (SCRIPT_REAL).
     ModelName: 'LogisticRegression', 'XGBoost', 'SGDClassifier', 'RandomForest' 중 하나.
     태블로 파라미터(드롭다운)에서 리스트로 오면 첫 번째 값 사용.
+    ※ 다른 모델 선택 시 값이 안 나오면: Tableau 계산 필드에서 8번째 인자로 [Select ML Model] 전달 여부 확인,
+      TabPy 서버에 4개 pkl 파일 모두 있는지 확인, TabPy 콘솔 로그에서 오류 메시지 확인.
     """
     if hasattr(ModelName, '__len__') and not isinstance(ModelName, (str, bytes)):
         ModelName = ModelName[0] if len(ModelName) else "XGBoost"
+    if ModelName is None:
+        ModelName = "XGBoost"
     ModelName = str(ModelName).strip() or "XGBoost"
-    X = _channel_preprocess(Fresh, Milk, Grocery, Frozen, Detergents_Paper, Delicassen, Region)
-    if X.shape[0] == 0:
-        return []
-    clf = _load_channel_model(ModelName)
-    proba = clf.predict_proba(X)[:, 1]
-    return proba.tolist()
+    import os, sys
+    if os.environ.get("TABPY_DEBUG_CHANNEL"):
+        print(f"[TabPy get_channel_proba] 수신 ModelName={ModelName!r}", file=sys.stderr)
+    try:
+        X = _channel_preprocess(Fresh, Milk, Grocery, Frozen, Detergents_Paper, Delicassen, Region)
+        if X.shape[0] == 0:
+            return []
+        clf = _load_channel_model(ModelName)
+        proba = clf.predict_proba(X)[:, 1]
+        return proba.tolist()
+    except Exception as e:
+        print(f"[TabPy get_channel_proba] ModelName={ModelName!r} 오류: {e}", file=sys.stderr)
+        raise
 
 
 def predict_customer_channel(Fresh, Milk, Grocery, Frozen, Detergents_Paper, Delicassen, Region, ModelName="XGBoost"):
